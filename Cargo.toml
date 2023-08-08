@@ -1,0 +1,25 @@
+[package]
+name = "kullat"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+glam = "0.24.1"
+stardust-xr-fusion = "0.42.1"
+tokio = { version = "1.29.1", features = ["rt"] }
+
+[dependencies.smithay]
+# git = "https://github.com/technobaboo/smithay.git" # Until we get stereokit to understand OES samplers and external textures
+git = "https://github.com/smithay/smithay.git" # Until we get stereokit to understand OES samplers and external textures
+# path = "../smithay"
+default-features = false
+features = [
+    "desktop",
+    "backend_drm",
+    "renderer_gl",
+    "wayland_frontend",
+]
+version = "*"
+optional = true
