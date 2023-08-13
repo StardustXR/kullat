@@ -9,17 +9,19 @@ edition = "2021"
 glam = "0.24.1"
 stardust-xr-fusion = "0.42.1"
 tokio = { version = "1.29.1", features = ["rt"] }
+tracing = { version = "0.1.37", features = ["max_level_trace", "release_max_level_debug"] }
+color-eyre = { version = "0.6.2", default-features = false }
 
 [dependencies.smithay]
-# git = "https://github.com/technobaboo/smithay.git" # Until we get stereokit to understand OES samplers and external textures
-git = "https://github.com/smithay/smithay.git" # Until we get stereokit to understand OES samplers and external textures
-# path = "../smithay"
+git = "https://github.com/smithay/smithay.git"
+
 default-features = false
 features = [
-    "desktop",
-    "backend_drm",
+    "backend_vulkan",
+    "backend_winit",
     "renderer_gl",
-    "wayland_frontend",
 ]
 version = "*"
-optional = true
+
+[patch.crates-io]
+stardust-xr-fusion = { path = "../core/fusion" }
