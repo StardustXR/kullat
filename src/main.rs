@@ -7,7 +7,6 @@ use std::thread;
 use stardust_xr_fusion::client::Client;
 
 use kullat::Kullat;
-use winit_display::WinitDisplay;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -19,18 +18,9 @@ async fn main() -> Result<()> {
 
 	let _root = client.wrap_root(Kullat::new(&client, stardust_rx, display_tx));
 
-	// let tokio_handle = Handle::current();
-
-	// let (winit_stop_tx, mut winit_stop_rx) = oneshot::channel::<()>();
-	let display_thread = thread::Builder::new().name("display".to_owned()).spawn({
-		move || -> Result<()> {
-			// let _tokio_guard = tokio_handle.enter();
-			let mut display = WinitDisplay::new(display_rx, stardust_tx)?;
-			loop {
-				display.update();
-			}
-		}
-	})?;
+	let _ = thread::Builder::new()
+		.name("display".to_owned())
+		.spawn(move || -> Result<()> { winit_display::start(display_rx, stardust_tx) });
 
 	tokio::select! {
 		biased;
