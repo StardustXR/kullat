@@ -4,23 +4,23 @@ use smithay::{
 		allocator::{
 			dmabuf::{Dmabuf, DmabufAllocator},
 			vulkan::{self, ImageUsageFlags, VulkanAllocator},
-			Fourcc,
+			Allocator, Fourcc,
 		},
 		egl::{
+			self,
 			context::{GlAttributes, PixelFormatRequirements},
 			display::EGLDisplay,
-			native, EGLContext, EGLSurface, Error as EGLError,
+			native, EGLContext, EGLSurface,
 		},
 		renderer::{gles::GlesRenderer, Bind, Blit, TextureFilter},
 		vulkan::{version::Version, Instance, PhysicalDevice},
-		winit::WindowSize,
 	},
 	reexports::{
 		ash::vk::ExtPhysicalDeviceDrmFn,
 		winit::{
 			dpi::LogicalSize,
 			event::{Event, WindowEvent},
-			event_loop::EventLoopBuilder,
+			event_loop::{EventLoopBuilder, EventLoopProxy},
 			platform::{
 				wayland::{EventLoopBuilderExtWayland, WindowExtWayland},
 				x11::WindowExtX11,
@@ -28,19 +28,21 @@ use smithay::{
 			window::{Window, WindowBuilder},
 		},
 	},
-	utils::{Physical, Rectangle, Size},
+	utils::Rectangle,
 };
-use std::{
-	cell::{Cell, RefCell},
-	rc::Rc,
-	sync::Arc,
-};
-use tokio::sync::mpsc::{Receiver, Sender};
+use std::{rc::Rc, sync::Arc};
+use tokio::sync::mpsc::Sender;
 use wayland_egl as wegl;
 
-use tracing::{debug, error, info, info_span, trace};
+use tracing::{debug, info, info_span, trace};
 
-pub fn start(display_rx: Receiver<()>, stardust_tx: Sender<()>) -> Result<()> {
+pub enum WinitDisplayMessage {
+	NewDisplay(EventLoopProxy<()>),
+	NewBuffers(Vec<Dmabuf>),
+	Render(usize),
+}
+
+pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 	let span = info_span!("backend_winit", window = tracing::field::Empty);
 	let _guard = span.enter();
 	info!("Initializing a winit backend");
@@ -67,13 +69,10 @@ pub fn start(display_rx: Receiver<()>, stardust_tx: Sender<()>) -> Result<()> {
 	span.record("window", Into::<u64>::into(winit_window.id()));
 	debug!("Window created");
 
-	let (w, h): (u32, u32) = winit_window.inner_size().into();
-	let size = Rc::new(RefCell::new(WindowSize {
-		physical_size: (w as i32, h as i32).into(),
-		scale_factor: winit_window.scale_factor(),
-	}));
+	let size = winit_window.inner_size();
 
 	let (display, context, surface, _is_x11) = init_egl(winit_window, attributes)?;
+
 	let pixel_format = surface.pixel_format();
 	let desired_fourcc: &[Fourcc] = if let 10 = pixel_format.color_bits {
 		&[
@@ -88,7 +87,7 @@ pub fn start(display_rx: Receiver<()>, stardust_tx: Sender<()>) -> Result<()> {
 	let supported_formats = display.dmabuf_texture_formats(); // TODO: Ask stardust for supported formats
 	let selected_format = desired_fourcc
 		.iter()
-		.find_map(|&f| supported_formats.iter().find(|&sf| sf.code == f))
+		.find_map(|&f| supported_formats.iter().cloned().find(|&sf| sf.code == f))
 		.ok_or_else(|| eyre!("No supported dmabuf format found"))?;
 
 	let egl = Rc::new(surface);
@@ -100,66 +99,76 @@ pub fn start(display_rx: Receiver<()>, stardust_tx: Sender<()>) -> Result<()> {
 			bail!("Failed to create vulkan allocator: {:?}", e)
 		}
 	};
-	error!("Vulkan allocator created");
+	info!("Vulkan allocator created");
 
-	let vk_image = allocator.0.create_buffer_with_usage(
-		size.borrow().physical_size.w.try_into()?,
-		size.borrow().physical_size.h.try_into()?,
-		selected_format.code,
-		&[selected_format.modifier],
-		ImageUsageFlags::SAMPLED,
-	);
+	let mut buffers: [Dmabuf; 2] = core::array::from_fn(|_| {
+		allocator
+			.create_buffer(
+				size.width,
+				size.height,
+				selected_format.code,
+				&[selected_format.modifier],
+			)
+			.map_err(|e| eyre!(e.to_string()))
+			.unwrap()
+	});
 
-	// State for the event loop
-	let mut buffer_to_present: Option<Dmabuf> = None;
-	let mut resized = false;
+	// state for the event loop
+	let mut buffer_to_present: Option<usize> = None;
+	let mut render_buffer: usize = 0;
 
-	event_loop.run(move |event, _, control_flow| match event {
+	let proxy = event_loop.create_proxy();
+	stardust_tx
+		.blocking_send(WinitDisplayMessage::NewDisplay(proxy))
+		.map_err(|e| eyre!(e.to_string()))?;
+
+	renderer.bind(egl.clone()).unwrap();
+
+	event_loop.run(move |event, _, _control_flow| match event {
+		Event::UserEvent(()) => {
+			buffer_to_present = Some(render_buffer);
+			render_buffer = (render_buffer + 1) % buffers.len();
+			stardust_tx
+				.blocking_send(WinitDisplayMessage::Render(render_buffer))
+				.unwrap();
+		}
 		Event::RedrawRequested(_id) => {
 			if buffer_to_present.is_none() {
 				return;
 			};
 
-			renderer.bind(egl.clone()).unwrap();
-
-			if resized {
-				let size = size.borrow().physical_size;
-				egl.resize(size.w, size.h, 0, 0);
-			}
-
 			renderer
 				.blit_from(
-					buffer_to_present.clone().unwrap(),
+					buffers[buffer_to_present.expect("Buffer to present doesn't exist")].clone(),
 					Rectangle::from_loc_and_size((0, 0), (1, 1)),
 					Rectangle::from_loc_and_size((0, 0), (1, 1)),
 					TextureFilter::Linear,
 				)
 				.unwrap();
 			egl.swap_buffers(None).unwrap();
+			buffer_to_present = None;
 		}
 		Event::WindowEvent { event, .. } => match event {
-			WindowEvent::Resized(psize) => {
-				trace!("Resizing window to {:?}", psize);
+			WindowEvent::Resized(new_size) => {
+				trace!("Resizing window to {:?}", new_size);
 
 				buffer_to_present = None;
 
-				let mut size = size.borrow_mut();
-				let (pw, ph): (u32, u32) = psize.into();
-				size.physical_size = (pw as i32, ph as i32).into();
-
-				resized = true;
-			}
-
-			WindowEvent::ScaleFactorChanged {
-				scale_factor,
-				new_inner_size: new_psize,
-			} => {
-				let mut size = size.borrow_mut();
-				let (pw, ph): (u32, u32) = (*new_psize).into();
-				size.physical_size = (pw as i32, ph as i32).into();
-				size.scale_factor = scale_factor;
-
-				resized = true;
+				egl.resize(new_size.width as i32, new_size.height as i32, 0, 0);
+				for buffer in buffers.iter_mut() {
+					*buffer = allocator
+						.create_buffer(
+							new_size.width,
+							new_size.height,
+							selected_format.code,
+							&[selected_format.modifier],
+						)
+						.map_err(|e| eyre!(e.to_string()))
+						.unwrap();
+				}
+				stardust_tx
+					.blocking_send(WinitDisplayMessage::NewBuffers(buffers.to_vec()))
+					.unwrap();
 			}
 			_ => (),
 		},
@@ -198,7 +207,7 @@ fn init_egl(
 					context.config_id(),
 					surface,
 				)
-				.map_err(EGLError::CreationFailed)?
+				.map_err(egl::Error::CreationFailed)?
 			},
 			false,
 		)
@@ -212,7 +221,7 @@ fn init_egl(
 					context.config_id(),
 					xlib_window,
 				)
-				.map_err(EGLError::CreationFailed)?
+				.map_err(egl::Error::CreationFailed)?
 			},
 			true,
 		)

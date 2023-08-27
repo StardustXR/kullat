@@ -5,18 +5,21 @@ use stardust_xr_fusion::{
 	client::{Client, FrameInfo, RootHandler},
 	core::values::Transform,
 	drawable::{Alignment, Text, TextStyle},
+	items::camera::CameraItem,
 	node::NodeType,
 };
 use tokio::sync::mpsc::{Receiver, Sender};
 
+use crate::winit_display::WinitDisplayMessage;
+
 pub struct Kullat {
 	client: Arc<Client>,
-	stardust_rx: Receiver<()>,
-	display_tx: Sender<()>,
+	stardust_rx: Receiver<WinitDisplayMessage>,
+	display_tx: Option<Sender<()>>,
 	text: Text,
 }
 impl Kullat {
-	pub fn new(client: &Arc<Client>, stardust_rx: Receiver<()>, display_tx: Sender<()>) -> Self {
+	pub fn new(client: &Arc<Client>, stardust_rx: Receiver<WinitDisplayMessage>) -> Self {
 		let text = Text::create(
 			client.get_root(),
 			Transform::from_position_rotation([0.0, 0.0, -1.0], Quat::from_rotation_y(PI)),
@@ -29,10 +32,20 @@ impl Kullat {
 		)
 		.unwrap();
 
+		let size = [1920u32, 1080u32];
+		let aspect_ratio = size[0] as f32 / size[1] as f32;
+		let mut camera = CameraItem::create(
+			client.get_root(),
+			Transform::default(),
+			glam::f32::Mat4::perspective_rh_gl(70.0f32.to_radians(), aspect_ratio, 0.1, 100.0),
+			size,
+		)
+		.unwrap();
+
 		Kullat {
 			client: client.clone(),
 			stardust_rx,
-			display_tx,
+			display_tx: None,
 			text,
 		}
 	}
