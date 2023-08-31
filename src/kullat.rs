@@ -1,6 +1,7 @@
 use std::{f32::consts::PI, sync::Arc};
 
 use glam::Quat;
+use smithay::{backend::egl::display, reexports::winit::event_loop::EventLoopProxy};
 use stardust_xr_fusion::{
 	client::{Client, FrameInfo, RootHandler},
 	core::values::Transform,
@@ -14,12 +15,10 @@ use crate::winit_display::WinitDisplayMessage;
 
 pub struct Kullat {
 	client: Arc<Client>,
-	stardust_rx: Receiver<WinitDisplayMessage>,
-	display_tx: Option<Sender<()>>,
 	text: Text,
 }
 impl Kullat {
-	pub fn new(client: &Arc<Client>, stardust_rx: Receiver<WinitDisplayMessage>) -> Self {
+	pub fn new(client: &Arc<Client>, mut stardust_rx: Receiver<WinitDisplayMessage>) -> Self {
 		let text = Text::create(
 			client.get_root(),
 			Transform::from_position_rotation([0.0, 0.0, -1.0], Quat::from_rotation_y(PI)),
@@ -42,10 +41,30 @@ impl Kullat {
 		)
 		.unwrap();
 
+		let camera_alias = camera.alias();
+
+		tokio::task::spawn(async move {
+			let mut display_tx: Option<EventLoopProxy<usize>> = None;
+			while let Some(message) = stardust_rx.recv().await {
+				match message {
+					WinitDisplayMessage::NewDisplay(new_display_tx) => {
+						display_tx.replace(new_display_tx);
+					}
+					WinitDisplayMessage::NewBuffers(buffers) => {
+						// await camera_alias.set_buffers(buffers).unwrap();
+					}
+					WinitDisplayMessage::Render(buffer_index) => {
+						let Some(display_tx) = display_tx.as_ref() else {
+							continue;
+						};
+						display_tx.send_event(buffer_index).unwrap();
+					}
+				}
+			}
+		});
+
 		Kullat {
 			client: client.clone(),
-			stardust_rx,
-			display_tx: None,
 			text,
 		}
 	}

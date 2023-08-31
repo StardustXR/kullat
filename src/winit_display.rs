@@ -4,15 +4,16 @@ use smithay::{
 		allocator::{
 			dmabuf::{Dmabuf, DmabufAllocator},
 			vulkan::{self, ImageUsageFlags, VulkanAllocator},
-			Allocator, Fourcc,
+			Allocator, Format, Fourcc,
 		},
 		egl::{
 			self,
 			context::{GlAttributes, PixelFormatRequirements},
 			display::EGLDisplay,
+			ffi::egl::RENDER_BUFFER,
 			native, EGLContext, EGLSurface,
 		},
-		renderer::{gles::GlesRenderer, Bind, Blit, TextureFilter},
+		renderer::{gles::GlesRenderer, Bind, Blit, Frame, Renderer, TextureFilter, Unbind},
 		vulkan::{version::Version, Instance, PhysicalDevice},
 	},
 	reexports::{
@@ -20,7 +21,7 @@ use smithay::{
 		winit::{
 			dpi::LogicalSize,
 			event::{Event, WindowEvent},
-			event_loop::{EventLoopBuilder, EventLoopProxy},
+			event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
 			platform::{
 				wayland::{EventLoopBuilderExtWayland, WindowExtWayland},
 				x11::WindowExtX11,
@@ -37,7 +38,7 @@ use wayland_egl as wegl;
 use tracing::{debug, info, info_span, trace};
 
 pub enum WinitDisplayMessage {
-	NewDisplay(EventLoopProxy<()>),
+	NewDisplay(EventLoopProxy<usize>),
 	NewBuffers(Vec<Dmabuf>),
 	Render(usize),
 }
@@ -59,7 +60,9 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 		vsync: true,
 	};
 
-	let event_loop = EventLoopBuilder::new().with_any_thread(true).build();
+	let event_loop = EventLoopBuilder::<usize>::with_user_event()
+		.with_any_thread(true)
+		.build();
 	let winit_window = Arc::new(
 		window_builder
 			.build(&event_loop)
@@ -67,28 +70,11 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 	);
 
 	span.record("window", Into::<u64>::into(winit_window.id()));
-	debug!("Window created");
+	info!("Window created");
 
-	let size = winit_window.inner_size();
+	let mut size = winit_window.inner_size();
 
 	let (display, context, surface, _is_x11) = init_egl(winit_window, attributes)?;
-
-	let pixel_format = surface.pixel_format();
-	let desired_fourcc: &[Fourcc] = if let 10 = pixel_format.color_bits {
-		&[
-			Fourcc::Abgr2101010,
-			Fourcc::Argb2101010,
-			Fourcc::Abgr8888,
-			Fourcc::Argb8888,
-		]
-	} else {
-		&[Fourcc::Abgr8888, Fourcc::Argb8888]
-	};
-	let supported_formats = display.dmabuf_texture_formats(); // TODO: Ask stardust for supported formats
-	let selected_format = desired_fourcc
-		.iter()
-		.find_map(|&f| supported_formats.iter().cloned().find(|&sf| sf.code == f))
-		.ok_or_else(|| eyre!("No supported dmabuf format found"))?;
 
 	let egl = Rc::new(surface);
 	let mut renderer: GlesRenderer = unsafe { GlesRenderer::new(context)?.into() };
@@ -101,6 +87,34 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 	};
 	info!("Vulkan allocator created");
 
+	let pixel_format = egl.pixel_format();
+	let desired_fourcc: &[Fourcc] = if let 10 = pixel_format.color_bits {
+		&[
+			Fourcc::Abgr2101010,
+			Fourcc::Argb2101010,
+			Fourcc::Abgr8888,
+			Fourcc::Argb8888,
+		]
+	} else {
+		&[Fourcc::Abgr8888, Fourcc::Argb8888]
+	};
+	let supported_formats = display.dmabuf_texture_formats(); // TODO: Ask stardust for supported formats
+	let selected_format = Format {
+		code: Fourcc::Abgr8888,
+		modifier: smithay::backend::allocator::Modifier::Linear,
+	};
+	// let selected_format = desired_fourcc
+	// 	.iter()
+	// 	.find_map(|&f| supported_formats.iter().cloned().find(|&sf| sf.code == f))
+	// 	.ok_or_else(|| eyre!("No supported dmabuf format found"))?;
+
+	info!("Buffer format selected: {selected_format:#?}");
+
+	let proxy = event_loop.create_proxy();
+	stardust_tx
+		.blocking_send(WinitDisplayMessage::NewDisplay(proxy))
+		.map_err(|e| eyre!(e.to_string()))?;
+
 	let mut buffers: [Dmabuf; 2] = core::array::from_fn(|_| {
 		allocator
 			.create_buffer(
@@ -112,47 +126,71 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 			.map_err(|e| eyre!(e.to_string()))
 			.unwrap()
 	});
+	info!("Buffers created");
+	stardust_tx.blocking_send(WinitDisplayMessage::NewBuffers(buffers.to_vec()))?;
+	stardust_tx.blocking_send(WinitDisplayMessage::Render(0))?;
 
-	// state for the event loop
 	let mut buffer_to_present: Option<usize> = None;
-	let mut render_buffer: usize = 0;
+	let mut t: u64 = 0;
 
-	let proxy = event_loop.create_proxy();
-	stardust_tx
-		.blocking_send(WinitDisplayMessage::NewDisplay(proxy))
-		.map_err(|e| eyre!(e.to_string()))?;
+	event_loop.run(move |event, _, control_flow| match event {
+		Event::UserEvent(rendered_buffer) => {
+			buffer_to_present.replace(rendered_buffer);
 
-	renderer.bind(egl.clone()).unwrap();
+			let render_buffer = (rendered_buffer + 1) % buffers.len();
 
-	event_loop.run(move |event, _, _control_flow| match event {
-		Event::UserEvent(()) => {
-			buffer_to_present = Some(render_buffer);
-			render_buffer = (render_buffer + 1) % buffers.len();
+			t += 1;
+			renderer.bind(buffers[render_buffer].clone()).unwrap();
+			{
+				let render_size: smithay::utils::Size<i32, smithay::utils::Physical> =
+					(size.width as i32, size.height as i32).into();
+				let mut frame = renderer
+					.render(render_size, smithay::utils::Transform::Normal)
+					.unwrap();
+				frame
+					.clear(
+						[
+							(t as f32 / 90.0).sin() / 2.0 + 0.5,
+							(30.0 + t as f32 / 90.0).sin() / 2.0 + 0.5,
+							(60.0 + t as f32 / 90.0).sin() / 2.0 + 0.5,
+							1.0,
+						],
+						&[Rectangle::from_loc_and_size(
+							(0, 0),
+							(size.width as i32, size.height as i32),
+						)],
+					)
+					.unwrap();
+			}
+			renderer.unbind().unwrap();
+
 			stardust_tx
 				.blocking_send(WinitDisplayMessage::Render(render_buffer))
 				.unwrap();
 		}
-		Event::RedrawRequested(_id) => {
-			if buffer_to_present.is_none() {
+		Event::MainEventsCleared => {
+			let Some(buffer_to_present) = buffer_to_present.take() else {
 				return;
 			};
 
+			renderer.bind(egl.clone()).unwrap();
 			renderer
 				.blit_from(
-					buffers[buffer_to_present.expect("Buffer to present doesn't exist")].clone(),
-					Rectangle::from_loc_and_size((0, 0), (1, 1)),
-					Rectangle::from_loc_and_size((0, 0), (1, 1)),
+					buffers[buffer_to_present].clone(),
+					Rectangle::from_loc_and_size((0, 0), (size.width as i32, size.height as i32)),
+					Rectangle::from_loc_and_size((0, 0), (size.width as i32, size.height as i32)),
 					TextureFilter::Linear,
 				)
 				.unwrap();
 			egl.swap_buffers(None).unwrap();
-			buffer_to_present = None;
+			renderer.unbind().unwrap();
 		}
 		Event::WindowEvent { event, .. } => match event {
 			WindowEvent::Resized(new_size) => {
 				trace!("Resizing window to {:?}", new_size);
 
 				buffer_to_present = None;
+				size = new_size;
 
 				egl.resize(new_size.width as i32, new_size.height as i32, 0, 0);
 				for buffer in buffers.iter_mut() {
@@ -169,6 +207,9 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 				stardust_tx
 					.blocking_send(WinitDisplayMessage::NewBuffers(buffers.to_vec()))
 					.unwrap();
+			}
+			WindowEvent::CloseRequested => {
+				*control_flow = ControlFlow::Exit;
 			}
 			_ => (),
 		},
@@ -229,7 +270,7 @@ fn init_egl(
 		unreachable!("No backends for winit other then Wayland and X11 are supported")
 	};
 
-	let _ = context.unbind();
+	context.unbind()?;
 
 	Ok((display, context, surface, is_x11))
 }

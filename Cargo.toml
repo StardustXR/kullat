@@ -10,6 +10,7 @@ glam = "0.24.1"
 stardust-xr-fusion = "0.42.1"
 tokio = { version = "1.29.1", features = ["rt"] }
 tracing = { version = "0.1.37", features = ["max_level_trace", "release_max_level_debug"] }
+tracing-subscriber = "0.3.17"
 color-eyre = { version = "0.6.2", default-features = false }
 wayland-egl = { version = "0.30.0"}
 
