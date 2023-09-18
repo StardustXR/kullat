@@ -10,10 +10,9 @@ use smithay::{
 			self,
 			context::{GlAttributes, PixelFormatRequirements},
 			display::EGLDisplay,
-			ffi::egl::RENDER_BUFFER,
 			native, EGLContext, EGLSurface,
 		},
-		renderer::{gles::GlesRenderer, Bind, Blit, Frame, Renderer, TextureFilter, Unbind},
+		renderer::{gles::GlesRenderer, Bind, Blit, TextureFilter, Unbind},
 		vulkan::{version::Version, Instance, PhysicalDevice},
 	},
 	reexports::{
@@ -38,9 +37,8 @@ use wayland_egl as wegl;
 use tracing::{debug, info, info_span, trace};
 
 pub enum WinitDisplayMessage {
-	NewDisplay(EventLoopProxy<usize>),
-	NewBuffers(Vec<Dmabuf>),
-	Render(usize),
+	NewDisplay(EventLoopProxy<()>),
+	Render(Dmabuf),
 }
 
 pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
@@ -60,7 +58,7 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 		vsync: true,
 	};
 
-	let event_loop = EventLoopBuilder::<usize>::with_user_event()
+	let event_loop = EventLoopBuilder::<()>::with_user_event()
 		.with_any_thread(true)
 		.build();
 	let winit_window = Arc::new(
@@ -88,7 +86,7 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 	info!("Vulkan allocator created");
 
 	let pixel_format = egl.pixel_format();
-	let desired_fourcc: &[Fourcc] = if let 10 = pixel_format.color_bits {
+	let _desired_fourcc: &[Fourcc] = if let 10 = pixel_format.color_bits {
 		&[
 			Fourcc::Abgr2101010,
 			Fourcc::Argb2101010,
@@ -98,7 +96,7 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 	} else {
 		&[Fourcc::Abgr8888, Fourcc::Argb8888]
 	};
-	let supported_formats = display.dmabuf_texture_formats(); // TODO: Ask stardust for supported formats
+	let _supported_formats = display.dmabuf_texture_formats(); // TODO: Ask stardust for supported formats
 	let selected_format = Format {
 		code: Fourcc::Abgr8888,
 		modifier: smithay::backend::allocator::Modifier::Linear,
@@ -127,51 +125,37 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 			.unwrap()
 	});
 	info!("Buffers created");
-	stardust_tx.blocking_send(WinitDisplayMessage::NewBuffers(buffers.to_vec()))?;
-	stardust_tx.blocking_send(WinitDisplayMessage::Render(0))?;
 
 	let mut buffer_to_present: Option<usize> = None;
-	let mut t: u64 = 0;
+	let mut buffer_to_render: usize = 0;
+
+	stardust_tx.blocking_send(WinitDisplayMessage::Render(
+		buffers[buffer_to_render].clone(),
+	))?;
 
 	event_loop.run(move |event, _, control_flow| match event {
-		Event::UserEvent(rendered_buffer) => {
-			buffer_to_present.replace(rendered_buffer);
-
-			let render_buffer = (rendered_buffer + 1) % buffers.len();
-
-			t += 1;
-			renderer.bind(buffers[render_buffer].clone()).unwrap();
-			{
-				let render_size: smithay::utils::Size<i32, smithay::utils::Physical> =
-					(size.width as i32, size.height as i32).into();
-				let mut frame = renderer
-					.render(render_size, smithay::utils::Transform::Normal)
-					.unwrap();
-				frame
-					.clear(
-						[
-							(t as f32 / 90.0).sin() / 2.0 + 0.5,
-							(30.0 + t as f32 / 90.0).sin() / 2.0 + 0.5,
-							(60.0 + t as f32 / 90.0).sin() / 2.0 + 0.5,
-							1.0,
-						],
-						&[Rectangle::from_loc_and_size(
-							(0, 0),
-							(size.width as i32, size.height as i32),
-						)],
-					)
-					.unwrap();
-			}
-			renderer.unbind().unwrap();
+		Event::UserEvent(()) => {
+			buffer_to_present.replace(buffer_to_render);
+			buffer_to_render = (buffer_to_render + 1) % buffers.len();
+			info!(
+				"Rendering to {}",
+				std::os::fd::AsRawFd::as_raw_fd(
+					&buffers[buffer_to_render].handles().next().unwrap().clone()
+				)
+			);
 
 			stardust_tx
-				.blocking_send(WinitDisplayMessage::Render(render_buffer))
+				.blocking_send(WinitDisplayMessage::Render(
+					buffers[buffer_to_render].clone(),
+				))
 				.unwrap();
 		}
 		Event::MainEventsCleared => {
 			let Some(buffer_to_present) = buffer_to_present.take() else {
 				return;
 			};
+
+			info!("Blitting {}", buffer_to_present);
 
 			renderer.bind(egl.clone()).unwrap();
 			renderer
@@ -204,9 +188,6 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 						.map_err(|e| eyre!(e.to_string()))
 						.unwrap();
 				}
-				stardust_tx
-					.blocking_send(WinitDisplayMessage::NewBuffers(buffers.to_vec()))
-					.unwrap();
 			}
 			WindowEvent::CloseRequested => {
 				*control_flow = ControlFlow::Exit;
