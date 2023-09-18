@@ -1,10 +1,5 @@
-use std::{
-	f32::consts::PI,
-	os::fd::{AsFd, OwnedFd},
-	sync::Arc,
-};
-
-use glam::Quat;
+use color::{rgba, Rgba};
+use glam::{f32::Mat4, vec3, Quat, Vec3};
 use smithay::{
 	backend::allocator::{dmabuf::DmabufFlags, Buffer},
 	reexports::winit::event_loop::EventLoopProxy,
@@ -12,17 +7,47 @@ use smithay::{
 use stardust_xr_fusion::{
 	client::{Client, FrameInfo, RootHandler},
 	core::values::{BufferInfo, BufferPlaneInfo, Transform},
-	drawable::{Alignment, Text, TextStyle},
+	drawable::{Alignment, LinePoint, Lines, Text, TextStyle},
 	items::camera::CameraItem,
 	node::NodeType,
 };
+use std::{f32::consts::PI, os::fd::OwnedFd, sync::Arc};
 use tokio::sync::mpsc::Receiver;
 
 use crate::winit_display::WinitDisplayMessage;
 
+pub fn rectangle(width: f32, height: f32) -> [Vec3; 4] {
+	let half_width = width * 0.5;
+	let half_height = height * 0.5;
+	let points = [
+		[half_width, half_height],
+		[-half_width, half_height],
+		[-half_width, -half_height],
+		[half_width, -half_height],
+	];
+
+	core::array::from_fn(|i| {
+		let point = points[i];
+		vec3(point[0], point[1], 0.0)
+	})
+}
+
+pub fn make_line_points(vec3s: &[Vec3], thickness: f32, color: Rgba<f32>) -> Vec<LinePoint> {
+	vec3s
+		.into_iter()
+		.map(|point| LinePoint {
+			point: (*point).into(),
+			thickness,
+			color,
+		})
+		.collect()
+}
+
 pub struct Kullat {
 	client: Arc<Client>,
 	text: Text,
+	_camera: CameraItem,
+	lines: Lines,
 }
 impl Kullat {
 	pub fn new(client: &Arc<Client>, mut stardust_rx: Receiver<WinitDisplayMessage>) -> Self {
@@ -40,15 +65,20 @@ impl Kullat {
 
 		let size = [1920u32, 1080u32];
 		let aspect_ratio = size[0] as f32 / size[1] as f32;
-		let camera = CameraItem::create(
+		let proj_matrix = Mat4::perspective_rh_gl(70.0f32.to_radians(), aspect_ratio, 0.1, 1000.0);
+		let lines = rectangle(1.0, 1.0)
+			.map(|p| proj_matrix.inverse().transform_point3(Vec3::from(p)).into());
+		let lines = Lines::create(
 			client.get_root(),
-			Transform::default(),
-			glam::f32::Mat4::perspective_rh_gl(70.0f32.to_radians(), aspect_ratio, 0.1, 100.0),
-			size,
+			Transform::none(),
+			&make_line_points(&lines, 0.01, rgba!(1.0, 0.0, 0.0, 1.0)),
+			true,
 		)
 		.unwrap();
+		let _camera =
+			CameraItem::create(client.get_root(), Transform::none(), proj_matrix, size).unwrap();
 
-		let camera_alias = camera.alias();
+		let camera_alias = _camera.alias();
 		let text_alias = text.alias();
 		let mut t: u64 = 0;
 
@@ -60,19 +90,20 @@ impl Kullat {
 						display_tx.replace(new_display_tx);
 					}
 					WinitDisplayMessage::Render(buffer) => {
-						let Some(display_tx) = display_tx.as_ref() else {
+						let Some(display_tx) = display_tx.clone() else {
 							continue;
 						};
 
 						let modifier = buffer.format().modifier;
-						let planes = (0..buffer.num_planes())
-							.zip(buffer.strides())
+						let planes = buffer
+							.strides()
 							.zip(buffer.offsets())
-							.map(|((idx, stride), offset)| BufferPlaneInfo {
+							.enumerate()
+							.map(|(idx, (stride, offset))| BufferPlaneInfo {
 								idx: idx as u32,
 								offset,
 								stride,
-								modifier: modifier,
+								modifier: u64::from(modifier),
 							})
 							.collect();
 
@@ -82,8 +113,9 @@ impl Kullat {
 						}
 
 						let buffer_info = BufferInfo {
-							size: (buffer.width() as u32, buffer.height() as u32),
-							fourcc: buffer.format().code,
+							height: buffer.height() as u32,
+							width: buffer.width() as u32,
+							fourcc: buffer.format().code as u32,
 							flags: flags.bits(),
 							planes: planes,
 						};
@@ -97,7 +129,11 @@ impl Kullat {
 						t = t + 1;
 						let _ = text_alias.set_text(format!("Rendering {} : {}", raw_fd, t));
 
-						let _ = camera_alias.render((buffer_info, fds)).await;
+						camera_alias
+							.render(buffer_info, fds)
+							.unwrap()
+							.await
+							.unwrap();
 						let _ = text_alias.set_text(format!("Rendered {} : {}", raw_fd, t));
 
 						let _ = display_tx.send_event(());
@@ -109,14 +145,16 @@ impl Kullat {
 		Kullat {
 			client: client.clone(),
 			text,
+			_camera,
+			lines,
 		}
 	}
 
 	fn handle_head_pos(&mut self) {
-		let hmd = self.client.get_hmd();
-		let root = self.client.get_root();
-		let text = self.text.alias();
-		let transform = hmd.get_position_rotation_scale(&root).unwrap();
+		// let hmd = self.client.get_hmd();
+		// let root = self.client.get_root();
+		// let text = self.text.alias();
+		// let transform = hmd.get_position_rotation_scale(&root).unwrap();
 		// tokio::task::spawn(async move {
 		// 	let position = transform.await.unwrap().0;
 		// 	text.set_text(format!(
@@ -128,7 +166,10 @@ impl Kullat {
 	}
 }
 impl RootHandler for Kullat {
-	fn frame(&mut self, _info: FrameInfo) {
+	fn frame(&mut self, info: FrameInfo) {
 		self.handle_head_pos();
+		let _ = self
+			._camera
+			.set_rotation(None, Quat::from_rotation_y(info.elapsed as f32));
 	}
 }

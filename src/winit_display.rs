@@ -129,9 +129,11 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 	let mut buffer_to_present: Option<usize> = None;
 	let mut buffer_to_render: usize = 0;
 
-	stardust_tx.blocking_send(WinitDisplayMessage::Render(
-		buffers[buffer_to_render].clone(),
-	))?;
+	stardust_tx
+		.blocking_send(WinitDisplayMessage::Render(
+			buffers[buffer_to_render].clone(),
+		))
+		.map_err(|_| eyre!("unable to send render message"))?;
 
 	event_loop.run(move |event, _, control_flow| match event {
 		Event::UserEvent(()) => {
