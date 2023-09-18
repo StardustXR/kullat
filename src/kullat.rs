@@ -69,14 +69,14 @@ impl Kullat {
 		let lines = rectangle(1.0, 1.0)
 			.map(|p| proj_matrix.inverse().transform_point3(Vec3::from(p)).into());
 		let lines = Lines::create(
-			client.get_root(),
+			client.get_hmd(),
 			Transform::none(),
 			&make_line_points(&lines, 0.01, rgba!(1.0, 0.0, 0.0, 1.0)),
 			true,
 		)
 		.unwrap();
 		let _camera =
-			CameraItem::create(client.get_root(), Transform::none(), proj_matrix, size).unwrap();
+			CameraItem::create(client.get_hmd(), Transform::identity(), proj_matrix, size).unwrap();
 
 		let camera_alias = _camera.alias();
 		let text_alias = text.alias();
@@ -166,10 +166,10 @@ impl Kullat {
 	}
 }
 impl RootHandler for Kullat {
-	fn frame(&mut self, info: FrameInfo) {
+	fn frame(&mut self, _info: FrameInfo) {
 		self.handle_head_pos();
 		let _ = self
 			._camera
-			.set_rotation(None, Quat::from_rotation_y(info.elapsed as f32));
+			.set_transform(Some(self.client.get_hmd()), Transform::identity());
 	}
 }
