@@ -6,35 +6,26 @@ use smithay::{
 			vulkan::{self, ImageUsageFlags, VulkanAllocator},
 			Allocator, Format, Fourcc,
 		},
-		egl::{
-			self,
-			context::{GlAttributes, PixelFormatRequirements},
-			display::EGLDisplay,
-			native, EGLContext, EGLSurface,
-		},
+		egl::context::GlAttributes,
 		renderer::{gles::GlesRenderer, Bind, Blit, TextureFilter, Unbind},
 		vulkan::{version::Version, Instance, PhysicalDevice},
 	},
-	reexports::{
-		ash::vk::ExtPhysicalDeviceDrmFn,
-		winit::{
-			dpi::LogicalSize,
-			event::{Event, WindowEvent},
-			event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
-			platform::{
-				wayland::{EventLoopBuilderExtWayland, WindowExtWayland},
-				x11::WindowExtX11,
-			},
-			window::{Window, WindowBuilder},
-		},
-	},
+	reexports::ash::vk::ExtPhysicalDeviceDrmFn,
 	utils::Rectangle,
 };
 use std::{rc::Rc, sync::Arc};
 use tokio::sync::mpsc::Sender;
-use wayland_egl as wegl;
+use winit::{
+	dpi::LogicalSize,
+	event::{Event, WindowEvent},
+	event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
+	platform::wayland::EventLoopBuilderExtWayland,
+	window::WindowBuilder,
+};
 
-use tracing::{debug, info, info_span, trace};
+use tracing::{info, info_span, trace};
+
+use crate::egl::init_egl;
 
 pub enum WinitDisplayMessage {
 	NewDisplay(EventLoopProxy<()>),
@@ -72,7 +63,7 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 
 	let mut size = winit_window.inner_size();
 
-	let (display, context, surface, _is_x11) = init_egl(winit_window, attributes)?;
+	let (_display, context, surface, _is_x11) = init_egl(winit_window, attributes)?;
 
 	let egl = Rc::new(surface);
 	let mut renderer: GlesRenderer = unsafe { GlesRenderer::new(context)?.into() };
@@ -83,28 +74,11 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 			bail!("Failed to create vulkan allocator: {:?}", e)
 		}
 	};
-	info!("Vulkan allocator created");
-
-	let pixel_format = egl.pixel_format();
-	let _desired_fourcc: &[Fourcc] = if let 10 = pixel_format.color_bits {
-		&[
-			Fourcc::Abgr2101010,
-			Fourcc::Argb2101010,
-			Fourcc::Abgr8888,
-			Fourcc::Argb8888,
-		]
-	} else {
-		&[Fourcc::Abgr8888, Fourcc::Argb8888]
-	};
-	let _supported_formats = display.dmabuf_texture_formats(); // TODO: Ask stardust for supported formats
+	info!("Vulkan allocator created"); // TODO: Ask stardust for supported formats
 	let selected_format = Format {
 		code: Fourcc::Abgr8888,
 		modifier: smithay::backend::allocator::Modifier::Linear,
 	};
-	// let selected_format = desired_fourcc
-	// 	.iter()
-	// 	.find_map(|&f| supported_formats.iter().cloned().find(|&sf| sf.code == f))
-	// 	.ok_or_else(|| eyre!("No supported dmabuf format found"))?;
 
 	info!("Buffer format selected: {selected_format:#?}");
 
@@ -198,64 +172,6 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 		},
 		_ => (),
 	})
-}
-
-fn init_egl(
-	winit_window: Arc<Window>,
-	attributes: GlAttributes,
-) -> Result<(EGLDisplay, EGLContext, EGLSurface, bool)> {
-	let display = EGLDisplay::new(winit_window.clone())?;
-
-	let context =
-		EGLContext::new_with_config(&display, attributes, PixelFormatRequirements::_10_bit())
-			.or_else(|_| {
-				EGLContext::new_with_config(&display, attributes, PixelFormatRequirements::_8_bit())
-			})?;
-
-	let (surface, is_x11) = if let Some(wl_surface) = winit_window.wayland_surface() {
-		debug!("Winit backend: Wayland");
-		let size = winit_window.inner_size();
-		let surface = unsafe {
-			wegl::WlEglSurface::new_from_raw(
-				wl_surface as *mut _,
-				size.width as i32,
-				size.height as i32,
-			)
-		}
-		.map_err(|e| eyre!(e.to_string()))?;
-		(
-			unsafe {
-				EGLSurface::new(
-					&display,
-					context.pixel_format().unwrap(),
-					context.config_id(),
-					surface,
-				)
-				.map_err(egl::Error::CreationFailed)?
-			},
-			false,
-		)
-	} else if let Some(xlib_window) = winit_window.xlib_window().map(native::XlibWindow) {
-		debug!("Winit backend: X11");
-		(
-			unsafe {
-				EGLSurface::new(
-					&display,
-					context.pixel_format().unwrap(),
-					context.config_id(),
-					xlib_window,
-				)
-				.map_err(egl::Error::CreationFailed)?
-			},
-			true,
-		)
-	} else {
-		unreachable!("No backends for winit other then Wayland and X11 are supported")
-	};
-
-	context.unbind()?;
-
-	Ok((display, context, surface, is_x11))
 }
 
 fn vulkan_allocator() -> Result<DmabufAllocator<VulkanAllocator>, vulkan::Error> {

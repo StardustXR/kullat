@@ -1,3 +1,4 @@
+mod egl;
 mod kullat;
 mod winit_display;
 

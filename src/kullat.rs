@@ -172,4 +172,8 @@ impl RootHandler for Kullat {
 			._camera
 			.set_transform(Some(self.client.get_hmd()), Transform::identity());
 	}
+
+	fn save_state(&mut self) -> stardust_xr_fusion::client::ClientState {
+		todo!()
+	}
 }

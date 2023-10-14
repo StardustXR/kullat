@@ -15,7 +15,8 @@ tracing = { version = "0.1.37", features = [
 ] }
 tracing-subscriber = "0.3.17"
 color-eyre = { version = "0.6.2", default-features = false }
-wayland-egl = { version = "0.30.0" }
+winit = "0.28.7"
+wayland-egl = { version = "0.32.0" }
 color-rs = "0.8.0"
 
 [dependencies.smithay]
