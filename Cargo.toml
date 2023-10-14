@@ -25,6 +25,3 @@ git = "https://github.com/smithay/smithay.git"
 default-features = false
 features = ["backend_vulkan", "backend_winit", "renderer_gl"]
 version = "*"
-
-[patch.crates-io]
-stardust-xr-fusion = { path = "../../core/fusion" }

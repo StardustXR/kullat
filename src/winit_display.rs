@@ -113,12 +113,6 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 		Event::UserEvent(()) => {
 			buffer_to_present.replace(buffer_to_render);
 			buffer_to_render = (buffer_to_render + 1) % buffers.len();
-			info!(
-				"Rendering to {}",
-				std::os::fd::AsRawFd::as_raw_fd(
-					&buffers[buffer_to_render].handles().next().unwrap().clone()
-				)
-			);
 
 			stardust_tx
 				.blocking_send(WinitDisplayMessage::Render(
@@ -130,8 +124,6 @@ pub fn start(stardust_tx: Sender<WinitDisplayMessage>) -> Result<()> {
 			let Some(buffer_to_present) = buffer_to_present.take() else {
 				return;
 			};
-
-			info!("Blitting {}", buffer_to_present);
 
 			renderer.bind(egl.clone()).unwrap();
 			renderer

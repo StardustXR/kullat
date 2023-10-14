@@ -47,7 +47,7 @@ pub struct Kullat {
 	client: Arc<Client>,
 	text: Text,
 	_camera: CameraItem,
-	lines: Lines,
+	_lines: Lines,
 }
 impl Kullat {
 	pub fn new(client: &Arc<Client>, mut stardust_rx: Receiver<WinitDisplayMessage>) -> Self {
@@ -79,8 +79,6 @@ impl Kullat {
 			CameraItem::create(client.get_hmd(), Transform::identity(), proj_matrix, size).unwrap();
 
 		let camera_alias = _camera.alias();
-		let text_alias = text.alias();
-		let mut t: u64 = 0;
 
 		tokio::task::spawn(async move {
 			let mut display_tx: Option<EventLoopProxy<()>> = None;
@@ -125,16 +123,11 @@ impl Kullat {
 							.map(|fd| fd.try_clone_to_owned().unwrap())
 							.collect();
 
-						let raw_fd = std::os::fd::AsRawFd::as_raw_fd(fds.first().unwrap().clone());
-						t = t + 1;
-						let _ = text_alias.set_text(format!("Rendering {} : {}", raw_fd, t));
-
 						camera_alias
 							.render(buffer_info, fds)
 							.unwrap()
 							.await
 							.unwrap();
-						let _ = text_alias.set_text(format!("Rendered {} : {}", raw_fd, t));
 
 						let _ = display_tx.send_event(());
 					}
@@ -146,23 +139,23 @@ impl Kullat {
 			client: client.clone(),
 			text,
 			_camera,
-			lines,
+			_lines: lines,
 		}
 	}
 
 	fn handle_head_pos(&mut self) {
-		// let hmd = self.client.get_hmd();
-		// let root = self.client.get_root();
-		// let text = self.text.alias();
-		// let transform = hmd.get_position_rotation_scale(&root).unwrap();
-		// tokio::task::spawn(async move {
-		// 	let position = transform.await.unwrap().0;
-		// 	text.set_text(format!(
-		// 		"{:.1}, {:.1}, {:.1}",
-		// 		position.x, position.y, position.z
-		// 	))
-		// 	.unwrap();
-		// });
+		let hmd = self.client.get_hmd();
+		let root = self.client.get_root();
+		let text = self.text.alias();
+		let transform = hmd.get_position_rotation_scale(&root).unwrap();
+		tokio::task::spawn(async move {
+			let position = transform.await.unwrap().0;
+			text.set_text(format!(
+				"{:.1}, {:.1}, {:.1}",
+				position.x, position.y, position.z
+			))
+			.unwrap();
+		});
 	}
 }
 impl RootHandler for Kullat {
