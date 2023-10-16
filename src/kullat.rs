@@ -1,20 +1,19 @@
 use color::{rgba, Rgba};
-use glam::{f32::Mat4, vec3, Quat, Vec3};
-use smithay::{
-	backend::allocator::{dmabuf::DmabufFlags, Buffer},
-	reexports::winit::event_loop::EventLoopProxy,
-};
+use glam::Quat;
+use glam::{f32::Mat4, vec3, Vec3, Vec4};
+use mint::{Quaternion, Vector3};
+use smithay::reexports::winit::event_loop::EventLoopProxy;
+use stardust_xr_fusion::drawable::{LinePoint, Lines};
 use stardust_xr_fusion::{
 	client::{Client, FrameInfo, RootHandler},
-	core::values::{BufferInfo, BufferPlaneInfo, Transform},
-	drawable::{Alignment, LinePoint, Lines, Text, TextStyle},
+	core::values::Transform,
 	items::camera::CameraItem,
 	node::NodeType,
 };
-use std::{f32::consts::PI, os::fd::OwnedFd, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::mpsc::Receiver;
 
-use crate::winit_display::WinitDisplayMessage;
+use crate::{render::render, winit_display::WinitDisplayMessage};
 
 pub fn rectangle(width: f32, height: f32) -> [Vec3; 4] {
 	let half_width = width * 0.5;
@@ -45,40 +44,30 @@ pub fn make_line_points(vec3s: &[Vec3], thickness: f32, color: Rgba<f32>) -> Vec
 
 pub struct Kullat {
 	client: Arc<Client>,
-	text: Text,
-	_camera: CameraItem,
+	camera: CameraItem,
 	_lines: Lines,
 }
 impl Kullat {
 	pub fn new(client: &Arc<Client>, mut stardust_rx: Receiver<WinitDisplayMessage>) -> Self {
-		let text = Text::create(
-			client.get_root(),
-			Transform::from_position_rotation([0.0, 0.0, -1.0], Quat::from_rotation_y(PI)),
-			"test",
-			TextStyle {
-				character_height: 0.05,
-				text_align: Alignment::Center.into(),
-				..Default::default()
-			},
-		)
-		.unwrap();
-
-		let size = [1920u32, 1080u32];
-		let aspect_ratio = size[0] as f32 / size[1] as f32;
-		let proj_matrix = Mat4::perspective_rh_gl(70.0f32.to_radians(), aspect_ratio, 0.1, 1000.0);
-		let lines = rectangle(1.0, 1.0)
-			.map(|p| proj_matrix.inverse().transform_point3(Vec3::from(p)).into());
+		let lines = rectangle(1.0, 1.0);
 		let lines = Lines::create(
-			client.get_hmd(),
-			Transform::none(),
-			&make_line_points(&lines, 0.01, rgba!(1.0, 0.0, 0.0, 1.0)),
+			client.get_root(),
+			Transform::from_scale(Vec3::new(0.3, 0.16875, 1.0)),
+			&make_line_points(&lines, 0.01, rgba!(1.0, 1.0, 1.0, 1.0)),
 			true,
 		)
 		.unwrap();
-		let _camera =
-			CameraItem::create(client.get_hmd(), Transform::identity(), proj_matrix, size).unwrap();
 
-		let camera_alias = _camera.alias();
+		let proj_matrix = Mat4::orthographic_rh_gl(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+		let camera = CameraItem::create(
+			client.get_hmd(),
+			Transform::identity(),
+			proj_matrix,
+			[512, 512],
+		)
+		.unwrap();
+
+		let camera_alias = camera.alias();
 
 		tokio::task::spawn(async move {
 			let mut display_tx: Option<EventLoopProxy<()>> = None;
@@ -92,42 +81,7 @@ impl Kullat {
 							continue;
 						};
 
-						let modifier = buffer.format().modifier;
-						let planes = buffer
-							.strides()
-							.zip(buffer.offsets())
-							.enumerate()
-							.map(|(idx, (stride, offset))| BufferPlaneInfo {
-								idx: idx as u32,
-								offset,
-								stride,
-								modifier: u64::from(modifier),
-							})
-							.collect();
-
-						let mut flags = DmabufFlags::empty();
-						if buffer.y_inverted() {
-							flags.toggle(DmabufFlags::Y_INVERT);
-						}
-
-						let buffer_info = BufferInfo {
-							height: buffer.height() as u32,
-							width: buffer.width() as u32,
-							fourcc: buffer.format().code as u32,
-							flags: flags.bits(),
-							planes: planes,
-						};
-
-						let fds: Vec<OwnedFd> = buffer
-							.handles()
-							.map(|fd| fd.try_clone_to_owned().unwrap())
-							.collect();
-
-						camera_alias
-							.render(buffer_info, fds)
-							.unwrap()
-							.await
-							.unwrap();
+						let _ = render(&camera_alias, buffer).await;
 
 						let _ = display_tx.send_event(());
 					}
@@ -137,36 +91,67 @@ impl Kullat {
 
 		Kullat {
 			client: client.clone(),
-			text,
-			_camera,
+			camera,
 			_lines: lines,
 		}
 	}
 
 	fn handle_head_pos(&mut self) {
-		let hmd = self.client.get_hmd();
-		let root = self.client.get_root();
-		let text = self.text.alias();
-		let transform = hmd.get_position_rotation_scale(&root).unwrap();
+		let hmd = self.client.get_hmd().alias();
+		let camera = self.camera.alias();
+		let target = self._lines.get_position_rotation_scale(&hmd).unwrap();
 		tokio::task::spawn(async move {
-			let position = transform.await.unwrap().0;
-			text.set_text(format!(
-				"{:.1}, {:.1}, {:.1}",
-				position.x, position.y, position.z
-			))
-			.unwrap();
+			let target = target.await.unwrap();
+			let target_loc: Vec3 = target.0.into();
+			let target_rot: Quat = target.1.into();
+			let up = target_rot.mul_vec3(Vec3::Y);
+
+			let look_at = Mat4::look_at_rh(Vec3::ZERO, target_loc, up);
+			let camera_rot = Quat::from_mat4(&look_at);
+
+			let proj_matrix = projection_mapped_perspective(target, 0.1, 1000.0);
+			let _ = camera.set_transform(
+				None,
+				Transform {
+					position: None,
+					rotation: Some(camera_rot.into()),
+					scale: None,
+				},
+			);
+			let _ = camera.set_proj_matrix(proj_matrix);
 		});
 	}
 }
 impl RootHandler for Kullat {
 	fn frame(&mut self, _info: FrameInfo) {
 		self.handle_head_pos();
-		let _ = self
-			._camera
-			.set_transform(Some(self.client.get_hmd()), Transform::identity());
 	}
 
 	fn save_state(&mut self) -> stardust_xr_fusion::client::ClientState {
 		todo!()
 	}
+}
+
+/// Creates a right-handed projection-mapped perspective projection matrix with [-1,1] depth range.
+/// (It's just a normal perspective projection for now)
+#[inline]
+pub fn projection_mapped_perspective(
+	target: (Vector3<f32>, Quaternion<f32>, Vector3<f32>),
+	z_near: f32,
+	z_far: f32,
+) -> Mat4 {
+	let target_distance: f32 = 1.25; //= target.0.z;
+
+	let inv_frust_depth = 1.0 / (z_near - z_far);
+
+	let y = 1.0 / (0.5 * target_distance).tan();
+	let x = y / target_distance;
+	let z = (z_near + z_far) * inv_frust_depth;
+	let w = (2.0 * z_near * z_far) * inv_frust_depth;
+	Mat4::from_cols(
+		Vec4::new(x, 0.0, 0.0, 0.0),
+		Vec4::new(0.0, y, 0.0, 0.0),
+		Vec4::new(0.0, 0.0, z, -1.0),
+		Vec4::new(0.0, 0.0, w, 0.0),
+	)
 }

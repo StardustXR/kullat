@@ -1,5 +1,6 @@
 mod egl;
 mod kullat;
+mod render;
 mod winit_display;
 
 use color_eyre::eyre::Result;
