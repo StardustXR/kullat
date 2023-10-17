@@ -66,7 +66,7 @@ impl Kullat {
 		let lines = rectangle(1.0, 1.0);
 		let lines = Lines::create(
 			client.get_root(),
-			Transform::from_scale(Vec3::new(0.3, 0.16875, 1.0)),
+			Transform::from_scale(Vec3::new(0.3, 0.1875, 1.0)),
 			&make_line_points(&lines, 0.01, rgba!(1.0, 1.0, 1.0, 1.0)),
 			true,
 		)
@@ -128,11 +128,8 @@ impl Kullat {
 			let proj_matrix = projection_mapped_perspective(target, 0.1, 1000.0);
 			let _ = camera.set_proj_matrix(proj_matrix);
 
-			text.set_text(format!(
-				"{:.1}, {:.1}, {:.1}",
-				target_rot.x, target_rot.y, target_rot.z
-			))
-			.unwrap();
+			text.set_text(format!("{:.1}, {:.1}", target.0.z, target.2.x))
+				.unwrap();
 		});
 	}
 }
@@ -154,12 +151,14 @@ pub fn projection_mapped_perspective(
 	z_near: f32,
 	z_far: f32,
 ) -> Mat4 {
-	let target_distance: f32 = 1.25; //= target.0.z;
+	let target_distance = Vec3::from(target.0).length();
+	let target_width = target.2.x;
+	let target_height = target.2.y;
 
 	let inv_frust_depth = 1.0 / (z_near - z_far);
 
-	let y = 1.0 / (0.5 * target_distance).tan();
-	let x = y / target_distance;
+	let x = 2.0 * target_distance / target_width;
+	let y = 2.0 * target_distance / target_height;
 	let z = (z_near + z_far) * inv_frust_depth;
 	let w = (2.0 * z_near * z_far) * inv_frust_depth;
 	Mat4::from_cols(
