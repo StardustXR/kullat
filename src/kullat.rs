@@ -3,13 +3,14 @@ use glam::Quat;
 use glam::{f32::Mat4, vec3, Vec3, Vec4};
 use mint::{Quaternion, Vector3};
 use smithay::reexports::winit::event_loop::EventLoopProxy;
-use stardust_xr_fusion::drawable::{LinePoint, Lines};
+use stardust_xr_fusion::drawable::{Alignment, LinePoint, Lines, Text, TextStyle};
 use stardust_xr_fusion::{
 	client::{Client, FrameInfo, RootHandler},
 	core::values::Transform,
 	items::camera::CameraItem,
 	node::NodeType,
 };
+use std::f32::consts::PI;
 use std::sync::Arc;
 use tokio::sync::mpsc::Receiver;
 
@@ -45,10 +46,23 @@ pub fn make_line_points(vec3s: &[Vec3], thickness: f32, color: Rgba<f32>) -> Vec
 pub struct Kullat {
 	client: Arc<Client>,
 	camera: CameraItem,
-	_lines: Lines,
+	text: Text,
+	lines: Lines,
 }
 impl Kullat {
 	pub fn new(client: &Arc<Client>, mut stardust_rx: Receiver<WinitDisplayMessage>) -> Self {
+		let text = Text::create(
+			client.get_root(),
+			Transform::from_position_rotation([0.0, 0.0, -1.0], Quat::from_rotation_y(PI)),
+			"test",
+			TextStyle {
+				character_height: 0.05,
+				text_align: Alignment::Center.into(),
+				..Default::default()
+			},
+		)
+		.unwrap();
+
 		let lines = rectangle(1.0, 1.0);
 		let lines = Lines::create(
 			client.get_root(),
@@ -59,13 +73,9 @@ impl Kullat {
 		.unwrap();
 
 		let proj_matrix = Mat4::orthographic_rh_gl(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-		let camera = CameraItem::create(
-			client.get_hmd(),
-			Transform::identity(),
-			proj_matrix,
-			[512, 512],
-		)
-		.unwrap();
+		let camera =
+			CameraItem::create(client.get_hmd(), Transform::none(), proj_matrix, [512, 512])
+				.unwrap();
 
 		let camera_alias = camera.alias();
 
@@ -92,33 +102,37 @@ impl Kullat {
 		Kullat {
 			client: client.clone(),
 			camera,
-			_lines: lines,
+			text,
+			lines,
 		}
 	}
 
 	fn handle_head_pos(&mut self) {
 		let hmd = self.client.get_hmd().alias();
 		let camera = self.camera.alias();
-		let target = self._lines.get_position_rotation_scale(&hmd).unwrap();
+		let text = self.text.alias();
+
+		let target = self.lines.get_position_rotation_scale(&hmd).unwrap();
 		tokio::task::spawn(async move {
 			let target = target.await.unwrap();
 			let target_loc: Vec3 = target.0.into();
 			let target_rot: Quat = target.1.into();
-			let up = target_rot.mul_vec3(Vec3::Y);
 
-			let look_at = Mat4::look_at_rh(Vec3::ZERO, target_loc, up);
+			let look_at = Mat4::look_at_rh(Vec3::ZERO, target_loc, target_rot * Vec3::Y);
 			let camera_rot = Quat::from_mat4(&look_at);
+			let _ = camera.set_transform(
+				Some(&hmd),
+				Transform::from_position_rotation([0.0; 3], camera_rot.inverse()),
+			);
 
 			let proj_matrix = projection_mapped_perspective(target, 0.1, 1000.0);
-			let _ = camera.set_transform(
-				None,
-				Transform {
-					position: None,
-					rotation: Some(camera_rot.into()),
-					scale: None,
-				},
-			);
 			let _ = camera.set_proj_matrix(proj_matrix);
+
+			text.set_text(format!(
+				"{:.1}, {:.1}, {:.1}",
+				target_rot.x, target_rot.y, target_rot.z
+			))
+			.unwrap();
 		});
 	}
 }
