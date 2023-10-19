@@ -1,6 +1,6 @@
 use color::{rgba, Rgba};
-use glam::Quat;
 use glam::{f32::Mat4, vec3, Vec3, Vec4};
+use glam::{Quat, Vec2};
 use mint::{Quaternion, Vector3};
 use smithay::reexports::winit::event_loop::EventLoopProxy;
 use stardust_xr_fusion::drawable::{Alignment, LinePoint, Lines, Text, TextStyle};
@@ -47,10 +47,13 @@ pub struct Kullat {
 	client: Arc<Client>,
 	camera: CameraItem,
 	text: Text,
-	lines: Lines,
+	_lines: Lines,
+	size: Vec2,
 }
 impl Kullat {
 	pub fn new(client: &Arc<Client>, mut stardust_rx: Receiver<WinitDisplayMessage>) -> Self {
+		let size = Vec2::new(1.6, 1.0);
+
 		let text = Text::create(
 			client.get_root(),
 			Transform::from_position_rotation([0.0, 0.0, -1.0], Quat::from_rotation_y(PI)),
@@ -66,16 +69,20 @@ impl Kullat {
 		let lines = rectangle(1.0, 1.0);
 		let lines = Lines::create(
 			client.get_root(),
-			Transform::from_scale(Vec3::new(0.3, 0.1875, 1.0)),
+			Transform::from_scale(Vec3::new(size.x, size.y, 1.0)),
 			&make_line_points(&lines, 0.01, rgba!(1.0, 1.0, 1.0, 1.0)),
 			true,
 		)
 		.unwrap();
 
 		let proj_matrix = Mat4::orthographic_rh_gl(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-		let camera =
-			CameraItem::create(client.get_hmd(), Transform::none(), proj_matrix, [512, 512])
-				.unwrap();
+		let camera = CameraItem::create(
+			client.get_root(),
+			Transform::identity(),
+			proj_matrix,
+			[512, 512],
+		)
+		.unwrap();
 
 		let camera_alias = camera.alias();
 
@@ -103,7 +110,8 @@ impl Kullat {
 			client: client.clone(),
 			camera,
 			text,
-			lines,
+			_lines: lines,
+			size,
 		}
 	}
 
@@ -111,24 +119,35 @@ impl Kullat {
 		let hmd = self.client.get_hmd().alias();
 		let camera = self.camera.alias();
 		let text = self.text.alias();
+		let size = self.size;
 
-		let target = self.lines.get_position_rotation_scale(&hmd).unwrap();
+		let hmd_transform = hmd
+			.get_position_rotation_scale(&self.client.get_root())
+			.unwrap();
 		tokio::task::spawn(async move {
-			let target = target.await.unwrap();
-			let target_loc: Vec3 = target.0.into();
-			let target_rot: Quat = target.1.into();
+			let hmd_pos = hmd_transform.await.unwrap().0;
+			let mut target = Vec3::from(hmd_pos) * Vec3::new(-1.0, -1.0, 1.0);
 
-			let look_at = Mat4::look_at_rh(Vec3::ZERO, target_loc, target_rot * Vec3::Y);
-			let camera_rot = Quat::from_mat4(&look_at);
+			let camera_rot;
+			if target.z < 0.0 {
+				target *= Vec3::new(-1.0, 1.0, 1.0);
+				camera_rot = Quat::from_rotation_x(PI);
+			} else {
+				camera_rot = Quat::IDENTITY;
+			};
 			let _ = camera.set_transform(
-				Some(&hmd),
-				Transform::from_position_rotation([0.0; 3], camera_rot.inverse()),
+				None,
+				Transform {
+					position: Some(hmd_pos),
+					rotation: Some(camera_rot.into()),
+					scale: None,
+				},
 			);
 
-			let proj_matrix = projection_mapped_perspective(target, 0.1, 1000.0);
+			let proj_matrix = projection_mapped_perspective(target, size, 0.1, 1000.0);
 			let _ = camera.set_proj_matrix(proj_matrix);
 
-			text.set_text(format!("{:.1}, {:.1}", target.0.z, target.2.x))
+			text.set_text(format!("{:.2}, {:.2} {:.2}", target.x, target.y, target.z))
 				.unwrap();
 		});
 	}
@@ -144,27 +163,20 @@ impl RootHandler for Kullat {
 }
 
 /// Creates a right-handed projection-mapped perspective projection matrix with [-1,1] depth range.
-/// (It's just a normal perspective projection for now)
 #[inline]
-pub fn projection_mapped_perspective(
-	target: (Vector3<f32>, Quaternion<f32>, Vector3<f32>),
-	z_near: f32,
-	z_far: f32,
-) -> Mat4 {
-	let target_distance = Vec3::from(target.0).length();
-	let target_width = target.2.x;
-	let target_height = target.2.y;
-
+pub fn projection_mapped_perspective(target: Vec3, size: Vec2, z_near: f32, z_far: f32) -> Mat4 {
 	let inv_frust_depth = 1.0 / (z_near - z_far);
 
-	let x = 2.0 * target_distance / target_width;
-	let y = 2.0 * target_distance / target_height;
-	let z = (z_near + z_far) * inv_frust_depth;
-	let w = (2.0 * z_near * z_far) * inv_frust_depth;
+	let x = 2.0 * target.z / size.x;
+	let y = 2.0 * target.z / size.y;
+	let a = 2.0 * target.x / size.x;
+	let b = 2.0 * target.y / size.y;
+	let c = (z_near + z_far) * inv_frust_depth;
+	let w = 2.0 * z_near * z_far * inv_frust_depth;
 	Mat4::from_cols(
 		Vec4::new(x, 0.0, 0.0, 0.0),
 		Vec4::new(0.0, y, 0.0, 0.0),
-		Vec4::new(0.0, 0.0, z, -1.0),
+		Vec4::new(a, b, c, -1.0),
 		Vec4::new(0.0, 0.0, w, 0.0),
 	)
 }
